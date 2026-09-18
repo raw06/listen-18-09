@@ -82,7 +82,7 @@ td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
 <div class="wrap">
   <div class="masthead">
     <h1>Nghe và chép chính tả</h1>
-    <p class="sub">Chép đúng từng từ bạn nghe được. Nghe lại bao nhiêu lần cũng được.</p>
+    <p class="sub">Chép ngay trong lúc nghe. Mỗi câu tự phát lại cho tới khi bạn bấm Enter.</p>
   </div>
   <hr class="rule">
 
@@ -96,7 +96,7 @@ td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
         <p class="hint" id="status">Bấm phát để bắt đầu</p>
       </div>
       <div class="row">
-        <button class="btn ghost" id="againBtn" disabled>Nghe lại câu</button>
+        <button class="btn ghost" id="againBtn" disabled>Nghe lại ngay</button>
         <select id="rateSel" aria-label="Tốc độ" style="width:auto">
           <option value="0.6">0,6×</option>
           <option value="0.8">0,8×</option>
@@ -155,7 +155,8 @@ td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
     [70.3, 74.3, 2, "You don't know what pressure is. You still get paid after a bad game."]
   ].map(function (r) { return { start: r[0], end: r[1], spk: r[2], text: r[3] }; });
 
-  var answers = {}, results = {}, target = -1, curIdx = -1, phase = "idle", stopAt = null;
+  var LOOP_GAP = 1500;
+  var answers = {}, results = {}, target = -1, phase = "idle", listenCount = 0, loopTimer = null;
 
   /* ---- chấm theo số từ đúng ---- */
   function norm(w) {
@@ -244,109 +245,130 @@ td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
       var li = $("ln" + i);
       var seen = i <= active || answers[i] !== undefined;
       li.className = "ln" + (seen ? "" : " future")
-        + (i === active && phase === "answer" ? " ask" : "")
-        + (i === active && phase === "play" ? " now" : "")
+        + (i === active && phase === "work" ? " ask" : "")
         + (i < active ? " done" : "");
       if (seen) fillLine(i); else li.querySelector(".body").innerHTML = "";
     });
   }
 
-  /* ---- phát ---- */
+  /* ---- phát: lặp câu hiện tại, nghỉ LOOP_GAP giữa hai lần ---- */
   function setIcon(playing) {
     $("mainIcon").innerHTML = playing ? '<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>' : '<path d="M8 5v14l11-7z"/>';
   }
-  function playRange(from, to) {
-    phase = "play"; stopAt = to;
-    audio.currentTime = from;
+  function clearLoop() {
+    if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
+  }
+  function scheduleLoop() {
+    clearLoop();
+    loopTimer = setTimeout(function () {
+      loopTimer = null;
+      if (phase !== "work" || target < 0) return;
+      listenCount++;
+      playCurrent();
+    }, LOOP_GAP);
+  }
+  function playCurrent() {
+    if (target < 0) return;
+    clearLoop();
+    var l = LINES[target];
+    audio.currentTime = l.start;
     audio.playbackRate = parseFloat($("rateSel").value);
-    audio.play().catch(function () { $("status").textContent = "Bấm nút phát lần nữa để trình duyệt cho chạy tiếng."; });
+    audio.play().catch(function () {
+      $("status").textContent = "Bấm nút phát lần nữa để trình duyệt cho chạy tiếng.";
+    });
     setIcon(true);
+    showStatus();
+  }
+  function showStatus() {
+    $("status").textContent = "Câu " + (target + 1) + " / " + LINES.length
+      + " · nghe lần " + listenCount;
+  }
+  function showProgress() {
+    var done = 0, i;
+    for (i = 0; i < LINES.length; i++) if (answers[i] !== undefined) done++;
+    $("fill").style.width = (100 * done / LINES.length) + "%";
+  }
+  function focusBox() {
+    var ta = target >= 0 ? $("ln" + target).querySelector("textarea") : null;
+    if (ta) ta.focus();
+  }
+  function lineEnded() {
+    if (phase !== "work" || target < 0) return;
+    audio.pause(); setIcon(false);
+    scheduleLoop();
   }
   audio.addEventListener("timeupdate", function () {
-    if (phase === "idle" || phase === "done") return;
-    $("fill").style.width = (100 * audio.currentTime / (audio.duration || 1)) + "%";
-    if (phase !== "play") return;
-    var i = LINES.findIndex(function (l) { return audio.currentTime >= l.start && audio.currentTime < l.end; });
-    if (i >= 0 && i !== curIdx) { curIdx = i; paint(i); }
-    if (stopAt !== null && audio.currentTime >= stopAt) { audio.pause(); setIcon(false); enterAnswer(); }
+    if (phase !== "work" || target < 0) return;
+    if (audio.currentTime >= LINES[target].end) lineEnded();
   });
-  audio.addEventListener("ended", function () {
-    if (phase === "play") { setIcon(false); if (target >= 0) enterAnswer(); else finish(); }
-  });
+  audio.addEventListener("ended", lineEnded);
 
-  /* ---- trả lời ---- */
-  function enterAnswer() {
-    if (target < 0) { finish(); return; }
-    phase = "answer"; curIdx = target; paint(target);
-    var li = $("ln" + target), body = li.querySelector(".body");
+  /* ---- vào một câu: mở ô nhập và phát cùng lúc ---- */
+  function enterLine(i) {
+    target = i; listenCount = 1; phase = "work";
+    paint(i);
+    var li = $("ln" + i), body = li.querySelector(".body");
     body.innerHTML = "";
     var ta = document.createElement("textarea");
     ta.rows = 2; ta.spellcheck = false; ta.autocapitalize = "off";
-    ta.setAttribute("aria-label", "Chép câu bạn vừa nghe");
+    ta.setAttribute("aria-label", "Chép câu bạn đang nghe");
     var row = document.createElement("div"); row.className = "row"; row.style.marginTop = "8px";
-    var last = target + 1 >= LINES.length;
+    var last = i + 1 >= LINES.length;
     var ok = document.createElement("button"); ok.className = "btn";
     ok.textContent = last ? "Nộp bài" : "Câu tiếp theo";
     var skip = document.createElement("button"); skip.className = "btn quiet"; skip.textContent = "Bỏ qua";
     row.append(ok, skip);
-    body.append(ta, row);
+    var tip = document.createElement("p"); tip.className = "mini";
+    tip.textContent = "Câu này sẽ tự phát lại cho tới khi bạn bấm Enter.";
+    body.append(ta, row, tip);
     ok.addEventListener("click", function () { submit(ta.value); });
     skip.addEventListener("click", function () { submit(""); });
     ta.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(ta.value); }
     });
-    ta.focus();
-    $("status").textContent = "Câu " + (target + 1) + " / " + LINES.length + " — chép lại rồi bấm Enter";
     $("againBtn").disabled = false;
     li.scrollIntoView({ block: "center", behavior: "smooth" });
+    ta.focus();
+    showProgress();
+    playCurrent();
   }
   function submit(answer) {
     var i = target;
     answers[i] = answer;
-    phase = "play"; paint(i);
-    if (i + 1 >= LINES.length) { target = -1; finish(); return; }
-    target = i + 1;
-    $("againBtn").disabled = true;
-    $("status").textContent = "Đang nghe câu " + (target + 1);
-    playRange(LINES[i].end, LINES[target].end);
+    clearLoop(); audio.pause(); setIcon(false);
+    if (i + 1 >= LINES.length) { target = -1; phase = "done"; showProgress(); finish(); return; }
+    enterLine(i + 1);
   }
 
   /* ---- nút ---- */
   $("mainBtn").addEventListener("click", function () {
-    if (phase === "idle") {
-      target = 0; curIdx = -1;
-      $("status").textContent = "Đang nghe câu 1";
-      playRange(0, LINES[0].end);
-      return;
+    if (phase === "done") return;
+    if (phase === "idle") { enterLine(0); return; }
+    if (audio.paused) {
+      var l = LINES[target];
+      if (audio.currentTime < l.start || audio.currentTime >= l.end) { listenCount++; playCurrent(); }
+      else { audio.play(); setIcon(true); showStatus(); }
+    } else {
+      audio.pause(); clearLoop(); setIcon(false);
+      $("status").textContent = "Tạm dừng — bấm nút phát để nghe tiếp";
     }
-    if (phase === "answer" || phase === "done") return;
-    if (audio.paused) { audio.play(); setIcon(true); } else { audio.pause(); setIcon(false); }
   });
   $("againBtn").addEventListener("click", function () {
-    if (phase !== "answer" || target < 0) return;
-    var l = LINES[target], keep = target;
-    audio.currentTime = l.start;
-    audio.playbackRate = parseFloat($("rateSel").value);
-    audio.play();
-    setIcon(true);
-    var watch = function () {
-      $("fill").style.width = (100 * audio.currentTime / (audio.duration || 1)) + "%";
-      if (audio.currentTime >= l.end) {
-        audio.pause(); setIcon(false);
-        audio.removeEventListener("timeupdate", watch);
-        if (phase === "answer" && target === keep) {
-          var ta = $("ln" + keep).querySelector("textarea");
-          if (ta) ta.focus();
-        }
-      }
-    };
-    audio.addEventListener("timeupdate", watch);
+    if (phase !== "work" || target < 0) return;
+    listenCount++;
+    playCurrent();
+    focusBox();
   });
-  $("rateSel").addEventListener("change", function () { audio.playbackRate = parseFloat(this.value); });
+  $("rateSel").addEventListener("change", function () {
+    audio.playbackRate = parseFloat(this.value);
+    focusBox();
+  });
 
   /* ---- kết thúc ---- */
   function finish() {
+    clearLoop();
     audio.pause(); setIcon(false); phase = "done";
+    $("againBtn").disabled = true;
     var hit = 0, tot = 0;
     LINES.forEach(function (l, i) {
       results[i] = grade(l.text, answers[i] || "");
@@ -384,7 +406,8 @@ td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
   $("retryBtn").addEventListener("click", init);
 
   function init() {
-    answers = {}; results = {}; target = -1; curIdx = -1; phase = "idle"; stopAt = null;
+    clearLoop();
+    answers = {}; results = {}; target = -1; phase = "idle"; listenCount = 0;
     audio.pause(); audio.currentTime = 0;
     buildScript(); paint(-1); setIcon(false);
     $("fill").style.width = "0%";
